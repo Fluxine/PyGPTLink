@@ -30,17 +30,6 @@ class GPTCompletion:
             'model': context.model,
             'max_tokens': context.max_response_tokens,
             'stream': True,
-            'temperature': 1.0,
-            'frequency_penalty': 1.0,
-            'presence_penalty': 1.0,
-            'logit_bias': {
-                # () doesn't read well
-                7: -5,
-                8: -5,
-
-                # avoid + because it's a sign (pun intended) of trying to do math
-                10: -5
-            }
         }
 
     async def system(self, query: str, callback: Callable[[str, bool], None] = None, extra_system_prompt: Optional[str] = None,
