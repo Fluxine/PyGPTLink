@@ -1,3 +1,3 @@
 import logging
 
-logger = logging.getLogger("pygptlink")
+logger = logging.getLogger(__name__)
