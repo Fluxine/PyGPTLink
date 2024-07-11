@@ -51,7 +51,12 @@ class GPTTools:
             optional_args = []
             current_arg = {}
 
+            ignore_tool = False
+
             for line in doc_lines:
+                if "#NO_GPT_TOOL" in line:
+                    ignore_tool = True
+                    break
                 if "args:".casefold() == line.casefold() and previous_blank:
                     current_section = DocSection.ARGS
                 elif "returns:".casefold() == line.casefold() and previous_blank:
@@ -101,26 +106,11 @@ class GPTTools:
                         raise RuntimeError("Unknown enum, this is a bug")
                 previous_blank = not line
 
+            if ignore_tool:
+                continue
+
             tool = GPTToolDefinition(name=name, callback=method, description=summary,
                                      required_args=required_args, optional_args=optional_args)
             logger.debug(f"Parsed tool: {tool.__dict__}")
             ans.append(tool)
         return ans
-
-    def exclude_me(self):
-        pass
-
-    def test(self, name: str, age: int, time: Optional[float] = None) -> str:
-        """Load bearing docstring.
-        Second line of summary.
-
-        Args:
-            name (str): _description_ 
-            continued on a new line
-            age (int): _description_
-            time (Optional[float], optional): _description_. Defaults to None.
-
-        Returns:
-            str: _description_
-        """
-        return ""

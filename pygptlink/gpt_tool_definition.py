@@ -3,12 +3,7 @@ from typing import Any, Callable, Dict, List
 
 from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from pygptlink.gpt_logging import logger
-
-
-class NoResponseDesired:
-    """Return an instance of this class from the tool callback if no response from
-    the GPT model is desired."""
-    pass
+from pygptlink.gpt_no_response_desired import GPTNoResponseDesired
 
 
 class GPTToolDefinition:
@@ -34,7 +29,7 @@ class GPTToolDefinition:
             ans = await self.callback(**kwargs)
             if ans is None:
                 rv = "The tool call completed successfully."
-            elif isinstance(ans, NoResponseDesired):
+            elif isinstance(ans, GPTNoResponseDesired):
                 return ans
             else:
                 rv = f"The tool call returned: {ans}"

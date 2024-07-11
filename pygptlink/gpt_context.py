@@ -1,5 +1,4 @@
 import os
-from typing import Dict, List, Optional
 
 import jsonlines
 import tiktoken
@@ -9,16 +8,25 @@ from pygptlink.gpt_logging import logger
 
 
 class GPTContext:
-    """ Represents a context history usable for chat completion.
+    """Represents a context history usable for chat completion.
 
-    The persona file contains a text priming the agent to act a specific way.
-    The context file contains a JSONL file with previous message objects. This is used to persist the context and can also be used for post processing the potentially long history for fine-tuning.
-    The context_log_file is a debug log of all received and sent message objects. This is different from the context file by the fact that it contains the full completion response, not just the bits necessary for the next chat completion.
+    In this class "message" has a very distinct meaning, as one structured dict element in the "messages" list of dicts that is required by the OpenAI API for completions.    
     """
 
-    def __init__(self, model: str, max_tokens: int, max_response_tokens: int, persona_file: Optional[str] = None,
-                 context_file: Optional[str] = None, completion_log_file: Optional[str] = None) -> None:
+    def __init__(self, model: str, max_tokens: int, max_response_tokens: int, persona_file: str = None,
+                 context_file: str = None, completion_log_file: str = None) -> None:
+        """Creates a new GPTContext.
 
+        The `max_tokens` and `max_response_tokens` parameters are interdependent. The total number of tokens that can be returned from messages() is `max_tokens - max_response_tokens`. This is designed to prevent the response from being prematurely truncated due to the max token limit.
+
+        Parameters:
+            model (str): Name of an OpenAI model supported currently, such as "gpt-4o".
+            max_tokens (int): Defines the maximum token length for the generated "messages" output. Due to some margin of error in token estimation, it's advised not to set this parameter equal to the model's maximum token length but to allow some room for discrepancy.
+            max_response_tokens (int): Specifies the maximum response length to be passed to the API. The LLM response will be forcefully clipped after reaching this token limit. This serves as a damage control measure; for shorter, uninterrupted replies, consider giving instructions to the model instead.
+            persona_file (Optional[str], optional): This file includes text that primes the agent to behave in a specific way. If no value is provided, it defaults to None and the model behaves like a "helpful AI assistant".
+            context_file (Optional[str], optional): Contains a JSONL file with past messages. It's used to maintain the persisting context and can also aid in post-processing the potentially extensive history for fine-tuning. If not specified, defaults to None and means that the context is not persisted on disk.
+            completion_log_file (Optional[str], optional): This debug log contains all received and sent message objects. Unlike the context file, it holds the full completion response instead of just the necessary parts for the next chat completion. Defaults to None if left unspecified.
+        """
         self.model = model
         self.token_encoding = tiktoken.encoding_for_model(model)
         self.persona_file = persona_file
@@ -51,7 +59,23 @@ class GPTContext:
             except OSError as e:
                 logger.error(f"An error occurred while opening the file: {e}")
 
-    def append_completion(self, completion: ChatCompletion, choice: int = 0, name: str = None):
+    def copy(self) -> 'GPTContext':
+        """Creates a deep(er) copy of this context without a backing file
+
+        The context messages themselves aren't copied, but their containing array is, allowing you to add and remove but not change events.
+        """
+        new_ctx = GPTContext(model=self.model, max_tokens=self.max_tokens, max_response_tokens=self.max_response_tokens,
+                             persona_file=self.persona_file)
+        new_ctx.context = self.context.copy()
+        return new_ctx
+
+    def append_completion(self, completion: ChatCompletion, choice: int = 0) -> None:
+        """Parses a provided ChatCompletion object and appends suitable entries to the context to represent that this completion is part of the context history.
+
+        Args:
+            completion (ChatCompletion): The completion itself.
+            choice (int, optional): Which of the Choice objects in the completion to pick. Defaults to 0.
+        """
         if self.completion_log_file:
             with open(self.completion_log_file, 'a', encoding='utf-8') as file:
                 file.write(completion.model_dump_json(indent=2) + '\n')
@@ -64,8 +88,6 @@ class GPTContext:
         message = {"role": completion_message.role}
         if completion_message.content is not None:
             message["content"] = completion_message.content
-        if name is not None:
-            message["name"] = name
         if completion_message.tool_calls:
             message["tool_calls"] = [
                 {
@@ -79,34 +101,55 @@ class GPTContext:
             ]
         self.__append_message(message)
 
-    def append_user_prompt(self, user: str, content: str):
+    def append_user_prompt(self, user: str, content: str) -> None:
+        """Appends a user message onto the context.
+
+        Typically used before completing the context to respond to the provided user query.
+
+        Args:
+            user (str): The name of the user that is prompting. Must match [a-zA-Z0-9].
+            content (str): The contents of the prompt.
+        """
         message = {"role": "user", "name": user, "content": content}
         self.__append_message(message)
 
-    def append_tool_response(self, id, content):
+    def append_tool_response(self, id: str, content: str) -> None:
+        """Appends a tool response message onto the context.
+
+        There is usually no need to call this directly, the GPTCompletion.complete method will do that automatically.
+
+        Args:
+            id (str): The name of the user that is prompting. Must match [a-zA-Z0-9].
+            content (str): The contents of the prompt.
+        """
         message = {"role": "tool", "content": content, "tool_call_id": id}
         self.__append_message(message)
 
-    def append_system_message(self, message):
-        self.__append_message(self.__system_message(message))
+    def append_system_message(self, content: str) -> None:
+        """Appends a system message onto the context.
 
-    @staticmethod
-    def filter_tool_references(message, tool_id) -> Optional[Dict]:
-        if message["role"] == "assistant":
-            for tool_call in message["tool_calls"] or []:
-                if tool_call["id"] == tool_id:
-                    message["tool_calls"].remove(tool_call)
-                    if len(message["tool_calls"]) == 0:
-                        return None
-                    break
-            return message
-        if message["role"] == "tool" and message["tool_call_id"] == tool_id:
-            return None
-        return message
+        The models typically treats system messages slightly differently. They know that system messages are from the operator.
 
-    def messages(self, additional_system_prompt: str = None) -> List[Dict]:
-        assert additional_system_prompt == None or isinstance(
-            additional_system_prompt, str)
+        Use system messages when you need to influence the models behaviour.
+
+        Args:
+            content (str): The contents of the prompt.
+        """
+        self.__append_message(self.__system_message(content))
+
+    def messages(self, sticky_system_message: str = None) -> list[dict]:
+        """Generates a list of dicts that can be passed to OpenAIs completion API.
+
+        There is usually no need to call this directly.
+
+        Args:
+            additional_system_prompt (str, optional): The following text will be included as a system message early in the output messages but without adding it to the context. Use this for important system messages that should never "roll off" the context window or that you need to provide but don't want in the context permanently. Defaults to None.
+
+        Returns:
+            list[dict]: A "messages" structure, a list of "message" dicts.
+        """
+        assert sticky_system_message == None or isinstance(
+            sticky_system_message, str)
 
         if self.persona_file:
             with open(self.persona_file, 'r') as file:
@@ -128,8 +171,8 @@ class GPTContext:
         messages = left_split
         if self.persona_file:
             messages.append(self.__system_message(persona))
-        if additional_system_prompt:
-            messages.append(self.__system_message(additional_system_prompt))
+        if sticky_system_message:
+            messages.append(self.__system_message(sticky_system_message))
         messages += right_split
 
         available_tokens = self.max_tokens - self.max_response_tokens
@@ -139,7 +182,9 @@ class GPTContext:
             messages.pop(0)
         return messages
 
-    def clear(self):
+    def clear(self) -> None:
+        """Deletes everything from this context. INCLUDING DELETING THE CONTEXT ON DISK.
+        """
         self.context = []
         if self.context_file and os.path.exists(self.context_file):
             os.remove(self.context_file)
@@ -155,12 +200,12 @@ class GPTContext:
 
     # Taken from https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
     def __num_tokens_from_messages(self, messages):
-        """Return the number of tokens used by a list of messages."""
         if self.model in {
             "gpt-3.5-turbo",
             "gpt-4o",
             "gpt-4",
             "gpt-4-turbo",
+            "gpt-4-turbo-preview",
             "gpt-3.5-turbo-1106",
             "gpt-3.5-turbo-0613",
             "gpt-3.5-turbo-16k-0613",

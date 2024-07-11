@@ -1,14 +1,15 @@
 import asyncio
 import time
 from collections.abc import Callable
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import openai
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from pygptlink.gpt_context import GPTContext
-from pygptlink.gpt_tool_definition import GPTToolDefinition, NoResponseDesired
+from pygptlink.gpt_no_response_desired import GPTNoResponseDesired
+from pygptlink.gpt_tool_definition import GPTToolDefinition
 from pygptlink.gpt_logging import logger
 from pygptlink.sentenceextractor import SentenceExtractor
 
@@ -20,44 +21,29 @@ class GPTNoResponseNeeded(Exception):
 
 
 class GPTCompletion:
-    def __init__(self, api_key: str, context: GPTContext, tools: List[GPTToolDefinition] = []):
+    def __init__(self, api_key: str):
         self.lock = asyncio.Lock()
         self.oai = AsyncOpenAI(api_key=api_key)
         self.sentence_extractor = SentenceExtractor()
-        self.context = context
-        self.tools = {tool.name: tool for tool in tools}
-        self.completion_settings = {
-            'model': context.model,
-            'max_tokens': context.max_response_tokens,
-            'stream': True,
-        }
 
-    async def system(self, query: str, callback: Callable[[str, bool], None] = None, extra_system_prompt: Optional[str] = None,
-                     force_tool: Optional[str] = None, allowed_tools: Optional[List[str]] = None) -> str:
-        async with self.lock:
-            self.context.append_system_message(query)
-            return await self.__complete(callback=callback, extra_system_prompt=extra_system_prompt, force_tool=force_tool, allowed_tools=allowed_tools)
-
-    async def prompt(self, speaker: str, query: str, callback: Callable[[str, bool], None] = None, extra_system_prompt: Optional[str] = None,
-                     force_tool: Optional[str] = None, allowed_tools: Optional[List[str]] = None) -> str:
-        async with self.lock:
-            self.context.append_user_prompt(speaker, query)
-            return await self.__complete(callback=callback, extra_system_prompt=extra_system_prompt, force_tool=force_tool, allowed_tools=allowed_tools)
-
-    async def __complete(self,
-                         callback: Callable[[str, bool], None],
-                         extra_system_prompt: Optional[str] = None,
-                         force_tool: Optional[str] = None,
-                         allowed_tools: Optional[List[str]] = None) -> str:
+    async def complete(self, context: GPTContext,
+                       callback: Callable[[str, bool], None] = None,
+                       extra_system_prompt: Optional[str] = None,
+                       gpt_tools: list[GPTToolDefinition] = [],
+                       force_tool: str | bool | None = None,
+                       allowed_tools: Optional[list[str]] = None,
+                       no_append: bool = False) -> str:
         """Generates a response to the current context.
 
         Args:
+            context (GPTContext): A context to perform a completion on.
             extra_system_prompt (Optional[str]): An extra system prompt to be injected into the context, can be None.
-            callback (Callable[[str], None]): A callback to call with the response, line by line.
-            force_tool (str, optional): The name of a tool that must be called by the model. Defaults to None.
+            callback (Optional[Callable[[str], None]]): A callback to call with the response, line by line.
+            force_tool (str | bool | None): The name of a tool that must be called by the model. Defaults to None. Can be True to force any tool.
             allowed_tools (List[str], optional): A list of tools that the model may call. None means any tool it
                                                  knows of, [] means no tools may be called, or a list of named
                                                  tools. Defaults to None.
+            no_append (bool): False by default. If True, then the result of the completion will not be added to the context.
 
         Raises:
             ValueError: When inputs are invalid.
@@ -65,38 +51,47 @@ class GPTCompletion:
         Returns:
             Nothing
         """
+
+        tools = {tool.name: tool for tool in gpt_tools}
+        completion_settings = {
+            'model': context.model,
+            'max_tokens': context.max_response_tokens,
+            'stream': True,
+        }
         try:
             # Prepare arguments for completion
-            messages = self.context.messages(extra_system_prompt)
+            messages = context.messages(extra_system_prompt)
             logger.debug(f"Prompting with: {messages}")
-            if force_tool:
-                if not force_tool in self.tools:
+
+            if allowed_tools == None:
+                tool_defs = [
+                    tool.describe() for tool in tools.values()] if tools else None
+            elif allowed_tools == []:
+                tool_defs = None
+            else:
+                if not all(tool_name in tools for tool_name in allowed_tools):
+                    logger.error(
+                        f"Unknown tool in allowed tools! {allowed_tools}")
+                    raise ValueError("Invalid allowed tools list")
+                tool_defs = [tools[tool_name].describe()
+                             for tool_name in allowed_tools]
+
+            if isinstance(force_tool, bool) and force_tool:
+                tool_choice = "required"
+            elif isinstance(force_tool, str):
+                if force_tool not in tools.keys():
                     logger.error(f"Unknown tool in force_tool! {force_tool}")
                     raise ValueError(f"Non existent tool {force_tool} forced.")
                 tool_choice = {
                     "type": "function",
                     "function": {"name": force_tool}
                 }
-                tool_defs = [self.tools[force_tool].describe()]
+                tool_defs = [tools[force_tool].describe()]
             else:
-                if allowed_tools == None:
-                    tool_defs = [
-                        tool.describe() for tool in self.tools.values()] if self.tools else None
-                    tool_choice = "auto" if self.tools else None
-                elif allowed_tools == []:
-                    tool_defs = None
-                    tool_choice = None
-                else:
-                    if not all(tool_name in self.tools for tool_name in allowed_tools):
-                        logger.error(
-                            f"Unknown tool in allowed tools! {allowed_tools}")
-                        raise ValueError("Invalid allowed tools list")
-                    tool_defs = [self.tools[tool_name].describe()
-                                 for tool_name in allowed_tools]
-                    tool_choice = "auto"
+                tool_choice = "auto" if tools else None
 
             # Stream the completion
-            stream = await self.oai.chat.completions.create(messages=messages, **self.completion_settings, tools=tool_defs, tool_choice=tool_choice)
+            stream = await self.oai.chat.completions.create(messages=messages, **completion_settings, tools=tool_defs, tool_choice=tool_choice)
             partial_sentence = ""
             full_response: Dict[str, str] = {}
             chunk: ChatCompletionChunk
@@ -115,27 +110,29 @@ class GPTCompletion:
             # Look for any function calls in the finished completion.
             chat_completion = GPTCompletion.__to_chat_completion(full_response)
             logger.debug(f"Received object: {chat_completion}")
-            self.context.append_completion(chat_completion)
+            if not no_append:
+                context.append_completion(chat_completion)
             should_respond_to_tool = False
             for choice in chat_completion.choices:
                 for tool_call in choice.message.tool_calls or []:
-                    tool = self.tools.get(tool_call.function.name, None)
+                    tool = tools.get(tool_call.function.name, None)
                     if tool is None:
                         logger.warn(
                             f"Invalid tool invocation, tool: {tool_call.function.name} doesn't exist.")
                         response = f"Error: No such tool: {tool_call.function.name}."
-                        self.context.append_tool_response(
-                            tool_call.id, response)
+                        if not no_append:
+                            context.append_tool_response(
+                                tool_call.id, response)
                         # Let the LLM know so it can try to fix
                         should_respond_to_tool = True
                     else:
                         logger.info(f"Tool invocation: {tool_call.function}")
                         response = await tool.invoke(tool_call)
-                        if isinstance(response, NoResponseDesired):
+                        if isinstance(response, GPTNoResponseDesired):
                             response = ""
                         else:
                             should_respond_to_tool = True
-                        self.context.append_tool_response(
+                        context.append_tool_response(
                             tool_call.id, response)
                 logger.info(
                     f" -- LLM Response Ended ({choice.finish_reason}) -- ")
@@ -145,7 +142,8 @@ class GPTCompletion:
                 response = chat_completion.choices[0].message.content
 
             if should_respond_to_tool:
-                sub_response = await self.__complete(extra_system_prompt=extra_system_prompt, callback=callback, allowed_tools=allowed_tools, force_tool=force_tool)
+                sub_response = await self.complete(context=context, extra_system_prompt=extra_system_prompt, callback=callback,
+                                                   allowed_tools=allowed_tools, force_tool=force_tool, gpt_tools=gpt_tools)
 
                 if not response:
                     return sub_response
