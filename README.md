@@ -16,7 +16,6 @@ $ cd myproject/
 $ pip install ../PyGPTLink/
 ```
 
-
 ## How do I use it?
 
 See the examples in [`examples/`](examples/).
