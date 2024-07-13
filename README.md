@@ -8,6 +8,15 @@ PyGPTLink is a small utility that provides a higher level integration with ChatG
   * Automatic retry on retryable API errors with exponential backoff.
   * Context management supporting multiple simultaneous context. Makes it easier to implement Multi Agent Systems.
 
+## How do I install it?
+```shell
+$ git clone https://github.com/Fluxine/PyGPTLink.git
+$ cd myproject/
+# Create/enter your venv, adjust path to needs
+$ pip install ../PyGPTLink/
+```
+
+
 ## How do I use it?
 
 See the examples in [`examples/`](examples/).
