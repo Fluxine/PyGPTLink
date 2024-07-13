@@ -1,7 +1,7 @@
 import asyncio
-import time
 from collections.abc import Callable
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Optional
 
 import openai
 from openai import AsyncOpenAI
@@ -12,12 +12,6 @@ from pygptlink.gpt_no_response_desired import GPTNoResponseDesired
 from pygptlink.gpt_tool_definition import GPTToolDefinition
 from pygptlink.gpt_logging import logger
 from pygptlink.sentenceextractor import SentenceExtractor
-
-
-class GPTNoResponseNeeded(Exception):
-    def __init__(self, message="No Response Needed"):
-        self.message = message
-        super().__init__(self.message)
 
 
 class GPTCompletion:
@@ -58,117 +52,123 @@ class GPTCompletion:
             'max_tokens': context.max_response_tokens,
             'stream': True,
         }
-        try:
-            # Prepare arguments for completion
-            messages = context.messages(extra_system_prompt)
-            logger.debug(f"Prompting with: {messages}")
+        # Prepare arguments for completion
+        messages = context.messages(extra_system_prompt)
+        logger.debug(f"Prompting with: {messages}")
 
-            if allowed_tools == None:
-                tool_defs = [
-                    tool.describe() for tool in tools.values()] if tools else None
-            elif allowed_tools == []:
-                tool_defs = None
-            else:
-                if not all(tool_name in tools for tool_name in allowed_tools):
-                    logger.error(
-                        f"Unknown tool in allowed tools! {allowed_tools}")
-                    raise ValueError("Invalid allowed tools list")
-                tool_defs = [tools[tool_name].describe()
-                             for tool_name in allowed_tools]
+        if allowed_tools == None:
+            tool_defs = [
+                tool.describe() for tool in tools.values()] if tools else None
+        elif allowed_tools == []:
+            tool_defs = None
+        else:
+            if not all(tool_name in tools for tool_name in allowed_tools):
+                logger.error(
+                    f"Unknown tool in allowed tools! {allowed_tools}")
+                raise ValueError("Invalid allowed tools list")
+            tool_defs = [tools[tool_name].describe()
+                         for tool_name in allowed_tools]
 
-            if isinstance(force_tool, bool) and force_tool:
-                tool_choice = "required"
-            elif isinstance(force_tool, str):
-                if force_tool not in tools.keys():
-                    logger.error(f"Unknown tool in force_tool! {force_tool}")
-                    raise ValueError(f"Non existent tool {force_tool} forced.")
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": force_tool}
-                }
-                tool_defs = [tools[force_tool].describe()]
-            else:
-                tool_choice = "auto" if tools else None
+        if isinstance(force_tool, bool) and force_tool:
+            tool_choice = "required"
+        elif isinstance(force_tool, str):
+            if force_tool not in tools.keys():
+                logger.error(f"Unknown tool in force_tool! {force_tool}")
+                raise ValueError(f"Non existent tool {force_tool} forced.")
+            tool_choice = {
+                "type": "function",
+                "function": {"name": force_tool}
+            }
+            tool_defs = [tools[force_tool].describe()]
+        else:
+            tool_choice = "auto" if tools else None
 
-            # Stream the completion
-            stream = await self.oai.chat.completions.create(messages=messages, **completion_settings, tools=tool_defs, tool_choice=tool_choice)
-            partial_sentence = ""
-            full_response: Dict[str, str] = {}
-            chunk: ChatCompletionChunk
-            async for chunk in stream:
-                GPTCompletion.__merge_dicts(full_response, chunk.model_dump())
-                partial_sentence += chunk.choices[0].delta.content or ""
-                lines, partial_sentence = self.sentence_extractor.extract_partial(
-                    partial_sentence)
-                for line in lines:
-                    if callback:
-                        callback(line, False)
-            partial_sentence = partial_sentence.strip()
-            if callback:
-                callback(partial_sentence, True)
+        # Give up after about a minute
+        attempts = 5
+        delay_s = 1
+        stream = None
+        for attempt in range(attempts):
+            try:
+                stream = await self.oai.chat.completions.create(messages=messages, **completion_settings, tools=tool_defs, tool_choice=tool_choice)
+                break
+            except Exception as e:
+                if isinstance(e, openai.APIStatusError):
+                    if e.status_code != 429 and e.status_code >= 400 and e.status_code < 500:
+                        # Client error other than 429, retrying is unlikely to succeed
+                        raise e
+                # Remaining errors are 429, 5xx and APIConnectionError. We retry all of those.
+                if attempt < attempts-1:
+                    time.sleep(delay_s)
+                    delay_s *= 2
+                else:
+                    raise Exception(
+                        f"Giving up after {attempts} attempts, final error was: ") from e
 
-            # Look for any function calls in the finished completion.
-            chat_completion = GPTCompletion.__to_chat_completion(full_response)
-            logger.debug(f"Received object: {chat_completion}")
-            if not no_append:
-                context.append_completion(chat_completion)
-            should_respond_to_tool = False
-            for choice in chat_completion.choices:
-                for tool_call in choice.message.tool_calls or []:
-                    tool = tools.get(tool_call.function.name, None)
-                    if tool is None:
-                        logger.warn(
-                            f"Invalid tool invocation, tool: {tool_call.function.name} doesn't exist.")
-                        response = f"Error: No such tool: {tool_call.function.name}."
-                        if not no_append:
-                            context.append_tool_response(
-                                tool_call.id, response)
-                        # Let the LLM know so it can try to fix
-                        should_respond_to_tool = True
-                    else:
-                        logger.info(f"Tool invocation: {tool_call.function}")
-                        response = await tool.invoke(tool_call)
-                        if isinstance(response, GPTNoResponseDesired):
-                            response = ""
-                        else:
-                            should_respond_to_tool = True
+        partial_sentence = ""
+        full_response: dict[str, str] = {}
+        chunk: ChatCompletionChunk
+        async for chunk in stream:
+            GPTCompletion.__merge_dicts(full_response, chunk.model_dump())
+            partial_sentence += chunk.choices[0].delta.content or ""
+            lines, partial_sentence = self.sentence_extractor.extract_partial(
+                partial_sentence)
+            for line in lines:
+                if callback:
+                    callback(line, False)
+        partial_sentence = partial_sentence.strip()
+        if callback:
+            callback(partial_sentence, True)
+
+        # Look for any function calls in the finished completion.
+        chat_completion = GPTCompletion.__to_chat_completion(full_response)
+        logger.debug(f"Received object: {chat_completion}")
+        if not no_append:
+            context.append_completion(chat_completion)
+        should_respond_to_tool = False
+        for choice in chat_completion.choices:
+            for tool_call in choice.message.tool_calls or []:
+                tool = tools.get(tool_call.function.name, None)
+                if tool is None:
+                    logger.warn(
+                        f"Invalid tool invocation, tool: {tool_call.function.name} doesn't exist.")
+                    response = f"Error: No such tool: {tool_call.function.name}."
+                    if not no_append:
                         context.append_tool_response(
                             tool_call.id, response)
-                logger.info(
-                    f" -- LLM Response Ended ({choice.finish_reason}) -- ")
-
-            response = None
-            if chat_completion.choices[0].message:
-                response = chat_completion.choices[0].message.content
-
-            if should_respond_to_tool:
-                sub_response = await self.complete(context=context, extra_system_prompt=extra_system_prompt, callback=callback,
-                                                   allowed_tools=allowed_tools, force_tool=force_tool, gpt_tools=gpt_tools)
-
-                if not response:
-                    return sub_response
-                elif sub_response:
-                    return response + " " + sub_response
+                    # Let the LLM know so it can try to fix
+                    should_respond_to_tool = True
                 else:
-                    return response
+                    logger.info(f"Tool invocation: {tool_call.function}")
+                    response = await tool.invoke(tool_call)
+                    if isinstance(response, GPTNoResponseDesired):
+                        response = ""
+                    else:
+                        should_respond_to_tool = True
+                    context.append_tool_response(
+                        tool_call.id, response)
+            logger.info(
+                f" -- LLM Response Ended ({choice.finish_reason}) -- ")
+
+        response = None
+        if chat_completion.choices[0].message:
+            response = chat_completion.choices[0].message.content
+
+        if should_respond_to_tool:
+            sub_response = await self.complete(context=context, extra_system_prompt=extra_system_prompt, callback=callback,
+                                               allowed_tools=allowed_tools, force_tool=force_tool, gpt_tools=gpt_tools)
+
+            if not response:
+                return sub_response
+            elif sub_response:
+                return response + " " + sub_response
             else:
                 return response
-
-        except openai.APIConnectionError as e:
-            logger.error("The server could not be reached")
-            logger.error(e.__cause__)
-        except openai.RateLimitError as e:
-            logger.warn(
-                "A 429 status code was received; we should back off a bit.")
-        except openai.APIStatusError as e:
-            logger.error("Another non-200-range status code was received")
-            logger.error(e.status_code)
-            logger.error(e.response)
-            logger.error(e)
+        else:
+            return response
         return None
 
     @staticmethod
-    def __to_chat_completion(merged_chunks: Dict[str, Any]) -> ChatCompletion:
+    def __to_chat_completion(merged_chunks: dict[str, Any]) -> ChatCompletion:
         merged_chunks["object"] = "chat.completion"
         for choice in merged_chunks["choices"]:
             choice["message"] = choice["delta"]
@@ -177,7 +177,7 @@ class GPTCompletion:
         return ChatCompletion(**merged_chunks)
 
     @staticmethod
-    def __merge_dicts(current: Dict[str, Any], delta: Dict[str, Any]) -> None:
+    def __merge_dicts(current: dict[str, Any], delta: dict[str, Any]) -> None:
         for key, value in delta.items():
             if value is None:
                 continue

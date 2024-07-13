@@ -1,10 +1,24 @@
 import inspect
 import re
 from enum import Enum, auto
-from typing import List, Optional
 
 from pygptlink.gpt_tool_definition import GPTToolDefinition
 from pygptlink.gpt_logging import logger
+
+
+def __validate_type(type: str):
+    # Map python types to JSON Schema:
+    # https://json-schema.org/understanding-json-schema
+    if re.match("[Ll]ist\[.*?\]", type):
+        type = "array"
+
+    mapping = {'str': 'string', 'int': 'integer',
+               'bool': 'boolean', 'float': 'number'}
+    type = type.strip()
+    type = mapping.get(type, type)
+    if type in {'string', 'integer', 'number', 'boolean', 'array'}:
+        return type
+    raise RuntimeError(f"Unknown parameter type: {type} encountered!")
 
 
 class DocSection(Enum):
@@ -14,26 +28,15 @@ class DocSection(Enum):
     RAISES = auto()
 
 
-# This class encapsulates all the tools available for the GPT model to use and can generate
-# automatic descriptions for all tools suitable for use in completions.
 class GPTTools:
+    """This is a convenience class that provides an easy way to make python functions callable by LLMs (from GPTCompletion.complete()). It automatically maps Python methods from a subclass of this class to an array of GPTToolDefinitions suitable for use with GPTCompletion.
 
-    @staticmethod
-    def _validate_type(type: str):
-        # Optionally map python types to JSON Schema
-        # https://json-schema.org/understanding-json-schema
-        if re.match("List\[.*?\]", type):
-            type = "array"
+    To use this class, subclass it and add code and state necessary to implement the methods you wish the model to be able to call, document them with a standard docstring. That's it, when doing a completion, pass the output of `make_tools_list()` to the completion call.
 
-        mapping = {'str': 'string', 'int': 'integer',
-                   'bool': 'boolean', 'float': 'number'}
-        type = type.strip()
-        type = mapping.get(type, type)
-        if type in {'string', 'integer', 'number', 'boolean', 'array'}:
-            return type
-        raise RuntimeError(f"Unknown parameter type: {type} encountered!")
+    Methods starting with an '_' and methods without docstring are ignored, as are methods with a docstring that contain #NO_GPT_TOOL in the description.
+    """
 
-    def _describe_methods(self) -> List[GPTToolDefinition]:
+    def make_tools_list(self) -> list[GPTToolDefinition]:
         ans = []
         for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
             doc_string = inspect.getdoc(method)
@@ -81,11 +84,11 @@ class GPTTools:
                             opt_match = re.match(
                                 pattern=r"Optional\[(\w+)\].*|(.*?), optional.*", string=match.group(2).strip())
                             if opt_match:
-                                current_arg["type"] = GPTTools._validate_type(
+                                current_arg["type"] = __validate_type(
                                     opt_match.group(1) or opt_match.group(2))
                                 optional_args.append(current_arg)
                             else:
-                                current_arg["type"] = GPTTools._validate_type(
+                                current_arg["type"] = __validate_type(
                                     match.group(2).strip())
                                 required_args.append(current_arg)
                         else:
