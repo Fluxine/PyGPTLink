@@ -9,6 +9,7 @@ from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from pygptlink.gpt_context import GPTContext
 from pygptlink.gpt_no_response_desired import GPTNoResponseDesired
+from pygptlink.gpt_tokens import num_tokens_for_tools
 from pygptlink.gpt_tool_definition import GPTToolDefinition
 from pygptlink.gpt_logging import logger
 from pygptlink.sentenceextractor import SentenceExtractor
@@ -23,7 +24,7 @@ class GPTCompletion:
     async def complete(self, context: GPTContext,
                        callback: Callable[[str, bool], None] = None,
                        extra_system_prompt: str | None = None,
-                       gpt_tools: list[GPTToolDefinition] = [],
+                       tools: list[GPTToolDefinition] = [],
                        force_tool: bool = False,
                        allowed_tools: list[str] | None = None,
                        no_append: bool = False) -> str:
@@ -46,15 +47,12 @@ class GPTCompletion:
             Nothing
         """
 
-        tools = {tool.name: tool for tool in gpt_tools}
+        tools = {tool.name: tool for tool in tools}
         completion_settings = {
             'model': context.model,
             'max_tokens': context.max_response_tokens,
             'stream': True,
         }
-        # Prepare arguments for completion
-        messages = context.messages(extra_system_prompt)
-        logger.debug(f"Prompting with: {messages}")
 
         if allowed_tools == None:
             tool_defs = [
@@ -75,6 +73,13 @@ class GPTCompletion:
                     "Tool call forced but no tools allowed or available!")
         else:
             tool_choice = "auto" if tools else None
+
+        # Prepare arguments for completion
+        tool_tokens = num_tokens_for_tools(
+            functions=tool_defs, model=context.model)
+        messages = context.messages(
+            sticky_system_message=extra_system_prompt, reserved_tokens=tool_tokens)
+        logger.debug(f"Prompting with: {messages}")
 
         # Give up after about a minute
         attempts = 5
@@ -101,7 +106,7 @@ class GPTCompletion:
         full_response: dict[str, str] = {}
         chunk: ChatCompletionChunk
         async for chunk in stream:
-            GPTCompletion.__merge_dicts(full_response, chunk.model_dump())
+            GPTCompletion._merge_dicts(full_response, chunk.model_dump())
             partial_sentence += chunk.choices[0].delta.content or ""
             lines, partial_sentence = self.sentence_extractor.extract_partial(
                 partial_sentence)
@@ -113,7 +118,7 @@ class GPTCompletion:
             callback(partial_sentence, True)
 
         # Look for any function calls in the finished completion.
-        chat_completion = GPTCompletion.__to_chat_completion(full_response)
+        chat_completion = GPTCompletion._to_chat_completion(full_response)
         logger.debug(f"Received object: {chat_completion}")
         if not no_append:
             context.append_completion(chat_completion)
@@ -122,7 +127,7 @@ class GPTCompletion:
             for tool_call in choice.message.tool_calls or []:
                 tool = tools.get(tool_call.function.name, None)
                 if tool is None:
-                    logger.warn(
+                    logger.warning(
                         f"Invalid tool invocation, tool: {tool_call.function.name} doesn't exist.")
                     response = f"Error: No such tool: {tool_call.function.name}."
                     if not no_append:
@@ -148,7 +153,7 @@ class GPTCompletion:
 
         if should_respond_to_tool:
             sub_response = await self.complete(context=context, extra_system_prompt=extra_system_prompt, callback=callback,
-                                               allowed_tools=allowed_tools, force_tool=force_tool, gpt_tools=gpt_tools)
+                                               allowed_tools=allowed_tools, force_tool=force_tool, tools=tools)
 
             if not response:
                 return sub_response
@@ -158,10 +163,9 @@ class GPTCompletion:
                 return response
         else:
             return response
-        return None
 
     @staticmethod
-    def __to_chat_completion(merged_chunks: dict[str, Any]) -> ChatCompletion:
+    def _to_chat_completion(merged_chunks: dict[str, Any]) -> ChatCompletion:
         merged_chunks["object"] = "chat.completion"
         for choice in merged_chunks["choices"]:
             choice["message"] = choice["delta"]
@@ -170,7 +174,7 @@ class GPTCompletion:
         return ChatCompletion(**merged_chunks)
 
     @staticmethod
-    def __merge_dicts(current: dict[str, Any], delta: dict[str, Any]) -> None:
+    def _merge_dicts(current: dict[str, Any], delta: dict[str, Any]) -> None:
         for key, value in delta.items():
             if value is None:
                 continue
@@ -187,7 +191,7 @@ class GPTCompletion:
                 elif isinstance(value, dict):
                     if current[key] is None:
                         current[key] = {}
-                    GPTCompletion.__merge_dicts(current[key], value)
+                    GPTCompletion._merge_dicts(current[key], value)
                 elif isinstance(value, list):
                     if current[key] is None:
                         current[key] = []
@@ -199,5 +203,5 @@ class GPTCompletion:
                             if existing_entry is None:
                                 current[key].append(entry)
                             else:
-                                GPTCompletion.__merge_dicts(
+                                GPTCompletion._merge_dicts(
                                     existing_entry, entry)

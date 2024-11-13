@@ -5,6 +5,7 @@ import tiktoken
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from pygptlink.gpt_logging import logger
+from pygptlink.gpt_tokens import num_tokens_for_messages
 
 
 class GPTContext:
@@ -137,13 +138,13 @@ class GPTContext:
         """
         self.__append_message(self.__system_message(content))
 
-    def messages(self, sticky_system_message: str = None) -> list[dict]:
+    def messages(self, sticky_system_message: str = None, reserved_tokens: int = None) -> list[dict]:
         """Generates a list of dicts that can be passed to OpenAIs completion API.
 
         There is usually no need to call this directly.
 
         Args:
-            additional_system_prompt (str, optional): The following text will be included as a system message early in the output messages but without adding it to the context. Use this for important system messages that should never "roll off" the context window or that you need to provide but don't want in the context permanently. Defaults to None.
+            sticky_system_message (str, optional): The following text will be included as a system message early in the output messages but without adding it to the context. Use this for important system messages that should never "roll off" the context window or that you need to provide but don't want in the context permanently. Defaults to None.
 
         Returns:
             list[dict]: A "messages" structure, a list of "message" dicts.
@@ -175,8 +176,8 @@ class GPTContext:
             messages.append(self.__system_message(sticky_system_message))
         messages += right_split
 
-        available_tokens = self.max_tokens - self.max_response_tokens
-        while len(messages) and (messages[0]["role"] == "tool" or self.__num_tokens_from_messages(messages) > available_tokens):
+        available_tokens = self.max_tokens - self.max_response_tokens - reserved_tokens
+        while len(messages) and (messages[0]["role"] == "tool" or num_tokens_for_messages(messages, self.model) > available_tokens):
             if len(self.context) > 0:
                 self.context.pop(0)
             messages.pop(0)
@@ -197,54 +198,3 @@ class GPTContext:
 
     def __system_message(self, content: str):
         return {"role": "system", "content": content}
-
-    # Taken from https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
-    def __num_tokens_from_messages(self, messages):
-        if self.model in {
-            "gpt-3.5-turbo",
-            "gpt-4o",
-            "gpt-4",
-            "gpt-4-turbo",
-            "gpt-4-turbo-preview",
-            "gpt-3.5-turbo-1106",
-            "gpt-3.5-turbo-0613",
-            "gpt-3.5-turbo-16k-0613",
-            "gpt-4-0125-preview",
-            "gpt-4-0314",
-            "gpt-4-32k-0314",
-            "gpt-4-0613",
-            "gpt-4-32k-0613",
-        }:
-            tokens_per_message = 3
-            tokens_per_name = 1
-        elif self.model == "gpt-3.5-turbo-0301":
-            # every message follows <|start|>{role/name}\n{content}<|end|>\n
-            tokens_per_message = 4
-            tokens_per_name = -1  # if there's a name, the role is omitted
-        else:
-            raise NotImplementedError(
-                f"""num_tokens_from_messages() is not implemented for model {self.model}. See https://github.com/openai/openai-python/blob/main/chatml.md for information on how messages are converted to tokens."""
-            )
-
-        def recursive_iterate(dictionary):
-            for key, value in dictionary.items():
-                if isinstance(value, dict):
-                    yield from recursive_iterate(value)
-                else:
-                    yield key, value
-
-        num_tokens = 0
-        for message in messages:
-            num_tokens += tokens_per_message
-            for key, value in message.items():
-                if key == "tool_calls":
-                    for tool_call in value:
-                        for key, value in recursive_iterate(tool_call):
-                            num_tokens += len(self.token_encoding.encode(value))
-                else:
-                    if key == "name":
-                        num_tokens += tokens_per_name
-                    num_tokens += len(self.token_encoding.encode(value))
-
-        num_tokens += 3  # every reply is primed with <|start|>assistant<|message|>
-        return num_tokens
