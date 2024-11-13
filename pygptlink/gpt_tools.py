@@ -6,7 +6,7 @@ from pygptlink.gpt_tool_definition import GPTToolDefinition
 from pygptlink.gpt_logging import logger
 
 
-def __validate_type(type: str):
+def _validate_type(type: str):
     # Map python types to JSON Schema:
     # https://json-schema.org/understanding-json-schema
     if re.match("[Ll]ist\[.*?\]", type):
@@ -84,11 +84,11 @@ class GPTTools:
                             opt_match = re.match(
                                 pattern=r"Optional\[(\w+)\].*|(.*?), optional.*", string=match.group(2).strip())
                             if opt_match:
-                                current_arg["type"] = __validate_type(
+                                current_arg["type"] = _validate_type(
                                     opt_match.group(1) or opt_match.group(2))
                                 optional_args.append(current_arg)
                             else:
-                                current_arg["type"] = __validate_type(
+                                current_arg["type"] = _validate_type(
                                     match.group(2).strip())
                                 required_args.append(current_arg)
                         else:

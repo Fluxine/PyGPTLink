@@ -22,10 +22,10 @@ class GPTCompletion:
 
     async def complete(self, context: GPTContext,
                        callback: Callable[[str, bool], None] = None,
-                       extra_system_prompt: Optional[str] = None,
+                       extra_system_prompt: str | None = None,
                        gpt_tools: list[GPTToolDefinition] = [],
-                       force_tool: str | bool | None = None,
-                       allowed_tools: Optional[list[str]] = None,
+                       force_tool: bool = False,
+                       allowed_tools: list[str] | None = None,
                        no_append: bool = False) -> str:
         """Generates a response to the current context.
 
@@ -63,23 +63,16 @@ class GPTCompletion:
             tool_defs = None
         else:
             if not all(tool_name in tools for tool_name in allowed_tools):
-                logger.error(
-                    f"Unknown tool in allowed tools! {allowed_tools}")
-                raise ValueError("Invalid allowed tools list")
+                raise ValueError(
+                    "allowed_tools={allowed_tools} contains unknown tool")
             tool_defs = [tools[tool_name].describe()
                          for tool_name in allowed_tools]
 
         if isinstance(force_tool, bool) and force_tool:
             tool_choice = "required"
-        elif isinstance(force_tool, str):
-            if force_tool not in tools.keys():
-                logger.error(f"Unknown tool in force_tool! {force_tool}")
-                raise ValueError(f"Non existent tool {force_tool} forced.")
-            tool_choice = {
-                "type": "function",
-                "function": {"name": force_tool}
-            }
-            tool_defs = [tools[force_tool].describe()]
+            if not tool_defs:
+                raise ValueError(
+                    "Tool call forced but no tools allowed or available!")
         else:
             tool_choice = "auto" if tools else None
 
